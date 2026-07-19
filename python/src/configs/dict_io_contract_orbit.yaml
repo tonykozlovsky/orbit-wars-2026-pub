@@ -1,0 +1,760 @@
+# Dict→dict→tensor IO contracts for Orbit (batched player axis = ``flags.agents_max_cnt``).
+# Shapes use ``flags.agents_max_cnt`` for the leading dimension (4 in default training config).
+#
+# Contracts: ``orbit_wars_env_unpadded_output`` (``OrbitWarsEnv``), ``orbit_wars_env_output`` (after
+# ``OrbitPaddingWrapper``), ``reward_wrapper_output`` (after ``RewardWrapper``), ``obs_wrapper_output``
+# (after ``ObsWrapper``; includes the same tensor leaves as ``reward_wrapper_output`` plus policy ``obs``),
+# ``logging_wrapper_output`` (after ``LoggingWrapper``; same leaves as ``obs_wrapper_output`` plus ``info`` cumsums).
+# ``remap_and_filter_wrapper_output`` (after ``RemapAndFilterWrapper``; only remapped top-level keys:
+# ``obs_LEARN_INFER``, ``metrics_STAT``, ``reward_LEARN_STAT``, ``done_LEARN_STAT``, ``desync_done``, ``info_STAT``).
+# ``env_batch_wrapper_output`` (after ``EnvBatchWrapper``: same paths as remap, shapes prefixed with
+# ``flags.n_actor_envs`` from stacking inner envs on dim 0; per-env ``done`` scalar becomes ``[E]``).
+#
+# Torchbeast buffers (see ``create_buffers.compute_buffer_spec``): ``infer_request_buffer_template`` matches
+# one CPU infer-request slot (same ``obs_LEARN_INFER`` as env batch). ``infer_result_buffer_template``: one
+# infer-result slot (same ``(E, P, …)`` layout as ``obs_LEARN_INFER`` policy tensors). ``actor_learn_buffer_template``:
+# per-actor LEARN CPU rollout tree (leading time ``flags.rollout_time_steps``). ``learner_gpu_buffer_template``:
+# merged LEARN GPU batch (time × ``flags.batch_size`` × 1 player lane per tensor).
+#
+# Env tensors use ``flags.agents_max_cnt`` (four policy slots); 2p active seats occupy slots 0 and 3.
+#
+# Runtime validation is off unless ``IMPALA_DICT_IO_VALIDATE=1`` (see ``dict_io_contract.py``).
+enable: false
+
+named_leaf_sets:
+  orbit_cpp_policy_obs_unpadded:
+    paths:
+      - orbit_planet_features_CPP
+      - orbit_planet_arrival_features_CPP
+      - orbit_enemy_mask_CPP
+      - orbit_planet_mask_CPP
+      - orbit_planet_pairwise_mask_CPP
+      - orbit_planet_pairwise_features_CPP
+      - available_hit_mask_CPP
+      - available_action_mask_CPP
+      - action_taken_index_CPP
+      - player_mask_CPP
+    tensors:
+      orbit_planet_features_CPP:
+        shape: [flags.orbit_num_agents, 44, 48]
+        dtype: float32
+      orbit_planet_arrival_features_CPP:
+        shape: [flags.orbit_num_agents, 44, 100, 4, 13]
+        dtype: float32
+      orbit_enemy_mask_CPP:
+        shape: [flags.agents_max_cnt, 3]
+        dtype: float32
+      orbit_planet_mask_CPP:
+        shape: [flags.orbit_num_agents, 44]
+        dtype: float32
+      orbit_planet_pairwise_mask_CPP:
+        shape: [flags.orbit_num_agents, 1936]
+        dtype: float32
+      orbit_planet_pairwise_features_CPP:
+        shape: [flags.orbit_num_agents, 1936, 38]
+        dtype: float32
+      available_hit_mask_CPP:
+        shape: [flags.orbit_num_agents, 44, 308]
+        dtype: int8
+      available_action_mask_CPP:
+        shape: [flags.orbit_num_agents, 44, 88]
+        dtype: int8
+      action_taken_index_CPP:
+        shape: [flags.orbit_num_agents, 44, 1]
+        dtype: int32
+      player_mask_CPP:
+        shape: [flags.orbit_num_agents]
+        dtype: float32
+
+  obs_raw_episode_step_and_orbit_episode_done:
+    paths:
+      - obs_raw.episode_step
+      - orbit_episode_done
+    tensors:
+      obs_raw.episode_step:
+        shape: [flags.agents_max_cnt]
+        dtype: int64
+      orbit_episode_done:
+        shape: [flags.agents_max_cnt]
+        dtype: float32
+
+  obs_raw_episode_step_and_orbit_episode_done_unpadded:
+    paths:
+      - obs_raw.episode_step
+      - orbit_episode_done
+    tensors:
+      obs_raw.episode_step:
+        shape: [flags.orbit_num_agents]
+        dtype: int64
+      orbit_episode_done:
+        shape: [flags.orbit_num_agents]
+        dtype: float32
+
+  metrics_orbit_fleet_delta_and_env_step:
+    paths:
+      - metrics.orbit_fleet_delta
+      - metrics.env_step
+    tensors:
+      metrics.orbit_fleet_delta:
+        shape: [flags.agents_max_cnt]
+        dtype: float32
+      metrics.env_step:
+        shape: [flags.agents_max_cnt]
+        dtype: float32
+
+  metrics_orbit_fleet_delta_and_env_step_unpadded:
+    paths:
+      - metrics.orbit_fleet_delta
+      - metrics.env_step
+    tensors:
+      metrics.orbit_fleet_delta:
+        shape: [flags.orbit_num_agents]
+        dtype: float32
+      metrics.env_step:
+        shape: [flags.orbit_num_agents]
+        dtype: float32
+
+  reward_wrapper_metrics_reward_done:
+    paths:
+      - metrics.orbit_fleet_delta
+      - metrics.env_step
+      - metrics.weighted_reward
+      - reward.baseline
+      - reward.production_delta
+      - done
+      - desync_done
+    tensors:
+      metrics.orbit_fleet_delta:
+        shape: [flags.agents_max_cnt]
+        dtype: float32
+      metrics.env_step:
+        shape: [flags.agents_max_cnt]
+        dtype: float32
+      metrics.weighted_reward:
+        shape: [flags.agents_max_cnt]
+        dtype: float32
+      reward.baseline:
+        shape: [flags.agents_max_cnt]
+        dtype: float32
+      reward.production_delta:
+        shape: [flags.agents_max_cnt]
+        dtype: float32
+      done:
+        shape: []
+        dtype: bool
+      desync_done:
+        shape: []
+        dtype: bool
+
+  obs_wrapper_policy_obs:
+    paths:
+      - obs.orbit_planet_features
+      - obs.orbit_planet_arrival_features
+      - obs.orbit_enemy_mask
+      - obs.orbit_planet_mask
+      - obs.orbit_planet_pairwise_mask
+      - obs.orbit_planet_pairwise_features
+      - obs.available_action_mask
+      - obs.action_taken_index
+      - obs.player_mask
+    tensors:
+      obs.orbit_planet_features:
+        shape: [flags.agents_max_cnt, 44, 48]
+        dtype: float32
+      obs.orbit_planet_arrival_features:
+        shape: [flags.agents_max_cnt, 44, 100, 4, 13]
+        dtype: float32
+      obs.orbit_enemy_mask:
+        shape: [flags.agents_max_cnt, 3]
+        dtype: float32
+      obs.orbit_planet_mask:
+        shape: [flags.agents_max_cnt, 44]
+        dtype: float32
+      obs.orbit_planet_pairwise_mask:
+        shape: [flags.agents_max_cnt, 1936]
+        dtype: float32
+      obs.orbit_planet_pairwise_features:
+        shape: [flags.agents_max_cnt, 1936, 38]
+        dtype: float32
+      obs.available_action_mask:
+        shape: [flags.agents_max_cnt, 44, 88]
+        dtype: int8
+      obs.action_taken_index:
+        shape: [flags.agents_max_cnt, 44, 1]
+        dtype: int32
+      obs.player_mask:
+        shape: [flags.agents_max_cnt]
+        dtype: float32
+
+  orbit_cpp_policy_obs_padded:
+    paths:
+      - orbit_planet_features_CPP
+      - orbit_planet_arrival_features_CPP
+      - orbit_enemy_mask_CPP
+      - orbit_planet_mask_CPP
+      - orbit_planet_pairwise_mask_CPP
+      - orbit_planet_pairwise_features_CPP
+      - available_hit_mask_CPP
+      - available_action_mask_CPP
+      - action_taken_index_CPP
+      - player_mask_CPP
+    tensors:
+      orbit_planet_features_CPP:
+        shape: [flags.agents_max_cnt, 44, 48]
+        dtype: float32
+      orbit_planet_arrival_features_CPP:
+        shape: [flags.agents_max_cnt, 44, 100, 4, 13]
+        dtype: float32
+      orbit_enemy_mask_CPP:
+        shape: [flags.agents_max_cnt, 3]
+        dtype: float32
+      orbit_planet_mask_CPP:
+        shape: [flags.agents_max_cnt, 44]
+        dtype: float32
+      orbit_planet_pairwise_mask_CPP:
+        shape: [flags.agents_max_cnt, 1936]
+        dtype: float32
+      orbit_planet_pairwise_features_CPP:
+        shape: [flags.agents_max_cnt, 1936, 38]
+        dtype: float32
+      available_hit_mask_CPP:
+        shape: [flags.agents_max_cnt, 44, 308]
+        dtype: int8
+      available_action_mask_CPP:
+        shape: [flags.agents_max_cnt, 44, 88]
+        dtype: int8
+      action_taken_index_CPP:
+        shape: [flags.agents_max_cnt, 44, 1]
+        dtype: int32
+      player_mask_CPP:
+        shape: [flags.agents_max_cnt]
+        dtype: float32
+
+  logging_wrapper_info_cumsums:
+    paths:
+      - info.LOGGING_STAT_orbit_fleet_delta_cumsum
+      - info.LOGGING_STAT_env_step_cumsum
+      - info.LOGGING_STAT_weighted_reward_cumsum
+    tensors:
+      info.LOGGING_STAT_orbit_fleet_delta_cumsum:
+        shape: [flags.agents_max_cnt]
+        dtype: float32
+      info.LOGGING_STAT_env_step_cumsum:
+        shape: [flags.agents_max_cnt]
+        dtype: float32
+      info.LOGGING_STAT_weighted_reward_cumsum:
+        shape: [flags.agents_max_cnt]
+        dtype: float32
+
+  remap_wrapper_metrics_reward_done:
+    paths:
+      - metrics_STAT.orbit_fleet_delta
+      - metrics_STAT.env_step
+      - metrics_STAT.weighted_reward
+      - reward_LEARN_STAT.baseline
+      - reward_LEARN_STAT.production_delta
+      - done_LEARN_STAT
+      - desync_done
+    tensors:
+      metrics_STAT.orbit_fleet_delta:
+        shape: [flags.agents_max_cnt]
+        dtype: float32
+      metrics_STAT.env_step:
+        shape: [flags.agents_max_cnt]
+        dtype: float32
+      metrics_STAT.weighted_reward:
+        shape: [flags.agents_max_cnt]
+        dtype: float32
+      reward_LEARN_STAT.baseline:
+        shape: [flags.agents_max_cnt]
+        dtype: float32
+      reward_LEARN_STAT.production_delta:
+        shape: [flags.agents_max_cnt]
+        dtype: float32
+      done_LEARN_STAT:
+        shape: []
+        dtype: bool
+      desync_done:
+        shape: []
+        dtype: bool
+
+  remap_wrapper_original_player_mask_stat:
+    paths:
+      - original_player_mask_STAT
+    tensors:
+      original_player_mask_STAT:
+        shape: [flags.agents_max_cnt]
+        dtype: float32
+
+  remap_wrapper_obs_policy:
+    paths:
+      - obs_LEARN_INFER.orbit_planet_features
+      - obs_LEARN_INFER.orbit_planet_arrival_features
+      - obs_LEARN_INFER.orbit_enemy_mask
+      - obs_LEARN_INFER.orbit_planet_mask
+      - obs_LEARN_INFER.orbit_planet_pairwise_mask
+      - obs_LEARN_INFER.orbit_planet_pairwise_features
+      - obs_LEARN_INFER.available_action_mask
+      - obs_LEARN_INFER.action_taken_index
+      - obs_LEARN_INFER.player_mask
+    tensors:
+      obs_LEARN_INFER.orbit_planet_features:
+        shape: [flags.agents_max_cnt, 44, 48]
+        dtype: float32
+      obs_LEARN_INFER.orbit_planet_arrival_features:
+        shape: [flags.agents_max_cnt, 44, 100, 4, 13]
+        dtype: float32
+      obs_LEARN_INFER.orbit_enemy_mask:
+        shape: [flags.agents_max_cnt, 3]
+        dtype: float32
+      obs_LEARN_INFER.orbit_planet_mask:
+        shape: [flags.agents_max_cnt, 44]
+        dtype: float32
+      obs_LEARN_INFER.orbit_planet_pairwise_mask:
+        shape: [flags.agents_max_cnt, 1936]
+        dtype: float32
+      obs_LEARN_INFER.orbit_planet_pairwise_features:
+        shape: [flags.agents_max_cnt, 1936, 38]
+        dtype: float32
+      obs_LEARN_INFER.available_action_mask:
+        shape: [flags.agents_max_cnt, 44, 88]
+        dtype: int8
+      obs_LEARN_INFER.action_taken_index:
+        shape: [flags.agents_max_cnt, 44, 1]
+        dtype: int32
+      obs_LEARN_INFER.player_mask:
+        shape: [flags.agents_max_cnt]
+        dtype: float32
+
+  remap_wrapper_obs_masks_stat:
+    paths:
+      - action_taken_index_LEARN_STAT
+    tensors:
+      action_taken_index_LEARN_STAT:
+        shape: [flags.agents_max_cnt, 44, 1]
+        dtype: int32
+
+  remap_wrapper_info_cumsums:
+    paths:
+      - info_STAT.LOGGING_STAT_orbit_fleet_delta_cumsum
+      - info_STAT.LOGGING_STAT_env_step_cumsum
+      - info_STAT.LOGGING_STAT_weighted_reward_cumsum
+    tensors:
+      info_STAT.LOGGING_STAT_orbit_fleet_delta_cumsum:
+        shape: [flags.agents_max_cnt]
+        dtype: float32
+      info_STAT.LOGGING_STAT_env_step_cumsum:
+        shape: [flags.agents_max_cnt]
+        dtype: float32
+      info_STAT.LOGGING_STAT_weighted_reward_cumsum:
+        shape: [flags.agents_max_cnt]
+        dtype: float32
+
+  env_batch_remap_wrapper_metrics_reward_done:
+    paths:
+      - metrics_STAT.orbit_fleet_delta
+      - metrics_STAT.env_step
+      - metrics_STAT.weighted_reward
+      - reward_LEARN_STAT.baseline
+      - reward_LEARN_STAT.production_delta
+      - done_LEARN_STAT
+      - desync_done
+    tensors:
+      metrics_STAT.orbit_fleet_delta:
+        shape: [flags.n_actor_envs, flags.agents_max_cnt]
+        dtype: float32
+      metrics_STAT.env_step:
+        shape: [flags.n_actor_envs, flags.agents_max_cnt]
+        dtype: float32
+      metrics_STAT.weighted_reward:
+        shape: [flags.n_actor_envs, flags.agents_max_cnt]
+        dtype: float32
+      reward_LEARN_STAT.baseline:
+        shape: [flags.n_actor_envs, flags.agents_max_cnt]
+        dtype: float32
+      reward_LEARN_STAT.production_delta:
+        shape: [flags.n_actor_envs, flags.agents_max_cnt]
+        dtype: float32
+      done_LEARN_STAT:
+        shape: [flags.n_actor_envs]
+        dtype: bool
+      desync_done:
+        shape: [flags.n_actor_envs]
+        dtype: bool
+
+  env_batch_original_player_mask_stat:
+    paths:
+      - original_player_mask_STAT
+    tensors:
+      original_player_mask_STAT:
+        shape: [flags.n_actor_envs, flags.agents_max_cnt]
+        dtype: float32
+
+  benchmark_infer_request_seat_mapping:
+    paths:
+      - benchmark_model_by_seat
+    tensors:
+      benchmark_model_by_seat:
+        shape: [flags.n_actor_envs, flags.agents_max_cnt]
+        dtype: int64
+
+  env_batch_remap_wrapper_obs_policy:
+    paths:
+      - obs_LEARN_INFER.orbit_planet_features
+      - obs_LEARN_INFER.orbit_planet_arrival_features
+      - obs_LEARN_INFER.orbit_enemy_mask
+      - obs_LEARN_INFER.orbit_planet_mask
+      - obs_LEARN_INFER.orbit_planet_pairwise_mask
+      - obs_LEARN_INFER.orbit_planet_pairwise_features
+      - obs_LEARN_INFER.available_action_mask
+      - obs_LEARN_INFER.action_taken_index
+      - obs_LEARN_INFER.player_mask
+    tensors:
+      obs_LEARN_INFER.orbit_planet_features:
+        shape: [flags.n_actor_envs, flags.agents_max_cnt, 44, 48]
+        dtype: float32
+      obs_LEARN_INFER.orbit_planet_arrival_features:
+        shape: [flags.n_actor_envs, flags.agents_max_cnt, 44, 100, 4, 13]
+        dtype: float32
+      obs_LEARN_INFER.orbit_enemy_mask:
+        shape: [flags.n_actor_envs, flags.agents_max_cnt, 3]
+        dtype: float32
+      obs_LEARN_INFER.orbit_planet_mask:
+        shape: [flags.n_actor_envs, flags.agents_max_cnt, 44]
+        dtype: float32
+      obs_LEARN_INFER.orbit_planet_pairwise_mask:
+        shape: [flags.n_actor_envs, flags.agents_max_cnt, 1936]
+        dtype: float32
+      obs_LEARN_INFER.orbit_planet_pairwise_features:
+        shape: [flags.n_actor_envs, flags.agents_max_cnt, 1936, 38]
+        dtype: float32
+      obs_LEARN_INFER.available_action_mask:
+        shape: [flags.n_actor_envs, flags.agents_max_cnt, 44, 88]
+        dtype: int8
+      obs_LEARN_INFER.action_taken_index:
+        shape: [flags.n_actor_envs, flags.agents_max_cnt, 44, 1]
+        dtype: int32
+      obs_LEARN_INFER.player_mask:
+        shape: [flags.n_actor_envs, flags.agents_max_cnt]
+        dtype: float32
+
+  env_batch_remap_wrapper_obs_masks_stat:
+    paths:
+      - action_taken_index_LEARN_STAT
+    tensors:
+      action_taken_index_LEARN_STAT:
+        shape: [flags.n_actor_envs, flags.agents_max_cnt, 44, 1]
+        dtype: int32
+
+  env_batch_remap_wrapper_info_cumsums:
+    paths:
+      - info_STAT.LOGGING_STAT_orbit_fleet_delta_cumsum
+      - info_STAT.LOGGING_STAT_env_step_cumsum
+      - info_STAT.LOGGING_STAT_weighted_reward_cumsum
+    tensors:
+      info_STAT.LOGGING_STAT_orbit_fleet_delta_cumsum:
+        shape: [flags.n_actor_envs, flags.agents_max_cnt]
+        dtype: float32
+      info_STAT.LOGGING_STAT_env_step_cumsum:
+        shape: [flags.n_actor_envs, flags.agents_max_cnt]
+        dtype: float32
+      info_STAT.LOGGING_STAT_weighted_reward_cumsum:
+        shape: [flags.n_actor_envs, flags.agents_max_cnt]
+        dtype: float32
+
+  infer_result_policy_slots:
+    paths:
+      - behavior_log_prob_sum_LEARN.spawn_fleet
+      - actions_LEARN.spawn_fleet
+      - baseline_LEARN.baseline
+      - baseline_LEARN.production_delta
+    tensors:
+      behavior_log_prob_sum_LEARN.spawn_fleet:
+        shape: [flags.n_actor_envs, flags.agents_max_cnt]
+        dtype: bfloat16
+      actions_LEARN.spawn_fleet:
+        shape: [flags.n_actor_envs, flags.agents_max_cnt, 44, 1]
+        dtype: int64
+      baseline_LEARN.baseline:
+        shape: [flags.n_actor_envs, flags.agents_max_cnt]
+        dtype: float32
+      baseline_LEARN.production_delta:
+        shape: [flags.n_actor_envs, flags.agents_max_cnt]
+        dtype: float32
+
+  actor_learn_reward_done:
+    paths:
+      - reward_LEARN_STAT.baseline
+      - reward_LEARN_STAT.production_delta
+      - done_LEARN_STAT
+      - game_num_players_LEARN
+      - frozen_model_by_player_axis_LEARN
+    tensors:
+      reward_LEARN_STAT.baseline:
+        shape: [flags.rollout_time_steps, flags.n_actor_envs, flags.agents_max_cnt]
+        dtype: float32
+      reward_LEARN_STAT.production_delta:
+        shape: [flags.rollout_time_steps, flags.n_actor_envs, flags.agents_max_cnt]
+        dtype: float32
+      done_LEARN_STAT:
+        shape: [flags.rollout_time_steps, flags.n_actor_envs, flags.agents_max_cnt]
+        dtype: bool
+      game_num_players_LEARN:
+        shape: [flags.rollout_time_steps, flags.n_actor_envs, flags.agents_max_cnt]
+        dtype: int64
+      frozen_model_by_player_axis_LEARN:
+        shape: [flags.rollout_time_steps, flags.n_actor_envs, flags.agents_max_cnt, 4]
+        dtype: int64
+
+  actor_learn_policy_heads:
+    paths:
+      - behavior_log_prob_sum_LEARN.spawn_fleet
+      - actions_LEARN.spawn_fleet
+    tensors:
+      behavior_log_prob_sum_LEARN.spawn_fleet:
+        shape: [flags.rollout_time_steps, flags.n_actor_envs, flags.agents_max_cnt]
+        dtype: bfloat16
+      actions_LEARN.spawn_fleet:
+        shape: [flags.rollout_time_steps, flags.n_actor_envs, flags.agents_max_cnt, 44, 1]
+        dtype: int64
+
+  actor_learn_obs_policy:
+    paths:
+      - obs_LEARN_INFER.orbit_planet_features
+      - obs_LEARN_INFER.orbit_planet_arrival_features
+      - obs_LEARN_INFER.orbit_enemy_mask
+      - obs_LEARN_INFER.orbit_planet_mask
+      - obs_LEARN_INFER.orbit_planet_pairwise_mask
+      - obs_LEARN_INFER.orbit_planet_pairwise_features
+      - obs_LEARN_INFER.available_action_mask
+      - obs_LEARN_INFER.action_taken_index
+      - obs_LEARN_INFER.player_mask
+    tensors:
+      obs_LEARN_INFER.orbit_planet_features:
+        shape: [flags.rollout_time_steps, flags.n_actor_envs, flags.agents_max_cnt, 44, 48]
+        dtype: float32
+      obs_LEARN_INFER.orbit_planet_arrival_features:
+        shape: [flags.rollout_time_steps, flags.n_actor_envs, flags.agents_max_cnt, 44, 100, 4, 13]
+        dtype: float32
+      obs_LEARN_INFER.orbit_enemy_mask:
+        shape: [flags.rollout_time_steps, flags.n_actor_envs, flags.agents_max_cnt, 3]
+        dtype: float32
+      obs_LEARN_INFER.orbit_planet_mask:
+        shape: [flags.rollout_time_steps, flags.n_actor_envs, flags.agents_max_cnt, 44]
+        dtype: float32
+      obs_LEARN_INFER.orbit_planet_pairwise_mask:
+        shape: [flags.rollout_time_steps, flags.n_actor_envs, flags.agents_max_cnt, 1936]
+        dtype: float32
+      obs_LEARN_INFER.orbit_planet_pairwise_features:
+        shape: [flags.rollout_time_steps, flags.n_actor_envs, flags.agents_max_cnt, 1936, 38]
+        dtype: float32
+      obs_LEARN_INFER.available_action_mask:
+        shape: [flags.rollout_time_steps, flags.n_actor_envs, flags.agents_max_cnt, 44, 88]
+        dtype: int8
+      obs_LEARN_INFER.action_taken_index:
+        shape: [flags.rollout_time_steps, flags.n_actor_envs, flags.agents_max_cnt, 44, 1]
+        dtype: int32
+      obs_LEARN_INFER.player_mask:
+        shape: [flags.rollout_time_steps, flags.n_actor_envs, flags.agents_max_cnt]
+        dtype: float32
+
+  actor_learn_policy_masks:
+    paths:
+      - action_taken_index_LEARN_STAT
+    tensors:
+      action_taken_index_LEARN_STAT:
+        shape: [flags.rollout_time_steps, flags.n_actor_envs, flags.agents_max_cnt, 44, 1]
+        dtype: int32
+
+  learner_gpu_reward_done:
+    paths:
+      - reward_LEARN_STAT.baseline
+      - reward_LEARN_STAT.production_delta
+      - done_LEARN_STAT
+      - game_num_players_LEARN
+      - frozen_model_by_player_axis_LEARN
+    tensors:
+      reward_LEARN_STAT.baseline:
+        shape: [flags.rollout_time_steps, flags.batch_size, 1]
+        dtype: float32
+      reward_LEARN_STAT.production_delta:
+        shape: [flags.rollout_time_steps, flags.batch_size, 1]
+        dtype: float32
+      done_LEARN_STAT:
+        shape: [flags.rollout_time_steps, flags.batch_size, 1]
+        dtype: bool
+      game_num_players_LEARN:
+        shape: [flags.rollout_time_steps, flags.batch_size, 1]
+        dtype: int64
+      frozen_model_by_player_axis_LEARN:
+        shape: [flags.rollout_time_steps, flags.batch_size, 1, 4]
+        dtype: int64
+
+  learner_gpu_policy_heads:
+    paths:
+      - behavior_log_prob_sum_LEARN.spawn_fleet
+      - actions_LEARN.spawn_fleet
+    tensors:
+      behavior_log_prob_sum_LEARN.spawn_fleet:
+        shape: [flags.rollout_time_steps, flags.batch_size, 1]
+        dtype: bfloat16
+      actions_LEARN.spawn_fleet:
+        shape: [flags.rollout_time_steps, flags.batch_size, 1, 44, 1]
+        dtype: int64
+
+  learner_gpu_obs_policy:
+    paths:
+      - obs_LEARN_INFER.orbit_planet_features
+      - obs_LEARN_INFER.orbit_planet_arrival_features
+      - obs_LEARN_INFER.orbit_enemy_mask
+      - obs_LEARN_INFER.orbit_planet_mask
+      - obs_LEARN_INFER.orbit_planet_pairwise_mask
+      - obs_LEARN_INFER.orbit_planet_pairwise_features
+      - obs_LEARN_INFER.available_action_mask
+      - obs_LEARN_INFER.action_taken_index
+      - obs_LEARN_INFER.player_mask
+    tensors:
+      obs_LEARN_INFER.orbit_planet_features:
+        shape: [flags.rollout_time_steps, flags.batch_size, 1, 44, 48]
+        dtype: float32
+      obs_LEARN_INFER.orbit_planet_arrival_features:
+        shape: [flags.rollout_time_steps, flags.batch_size, 1, 44, 100, 4, 13]
+        dtype: float32
+      obs_LEARN_INFER.orbit_enemy_mask:
+        shape: [flags.rollout_time_steps, flags.batch_size, 1, 3]
+        dtype: float32
+      obs_LEARN_INFER.orbit_planet_mask:
+        shape: [flags.rollout_time_steps, flags.batch_size, 1, 44]
+        dtype: float32
+      obs_LEARN_INFER.orbit_planet_pairwise_mask:
+        shape: [flags.rollout_time_steps, flags.batch_size, 1, 1936]
+        dtype: float32
+      obs_LEARN_INFER.orbit_planet_pairwise_features:
+        shape: [flags.rollout_time_steps, flags.batch_size, 1, 1936, 38]
+        dtype: float32
+      obs_LEARN_INFER.available_action_mask:
+        shape: [flags.rollout_time_steps, flags.batch_size, 1, 44, 88]
+        dtype: int8
+      obs_LEARN_INFER.action_taken_index:
+        shape: [flags.rollout_time_steps, flags.batch_size, 1, 44, 1]
+        dtype: int32
+      obs_LEARN_INFER.player_mask:
+        shape: [flags.rollout_time_steps, flags.batch_size, 1]
+        dtype: float32
+
+  learner_gpu_policy_masks:
+    paths:
+      - action_taken_index_LEARN_STAT
+    tensors:
+      action_taken_index_LEARN_STAT:
+        shape: [flags.rollout_time_steps, flags.batch_size, 1, 44, 1]
+        dtype: int32
+
+contracts:
+  orbit_wars_env_unpadded_output:
+    leaves:
+      plus:
+        - obs_raw_episode_step_and_orbit_episode_done
+        - metrics_orbit_fleet_delta_and_env_step
+        - orbit_cpp_policy_obs_padded
+
+  orbit_wars_env_output:
+    leaves:
+      plus:
+        - obs_raw_episode_step_and_orbit_episode_done
+        - metrics_orbit_fleet_delta_and_env_step
+        - orbit_cpp_policy_obs_padded
+
+  reward_wrapper_output:
+    leaves:
+      plus:
+        - obs_raw_episode_step_and_orbit_episode_done
+        - reward_wrapper_metrics_reward_done
+
+  obs_wrapper_output:
+    leaves:
+      plus:
+        - obs_raw_episode_step_and_orbit_episode_done
+        - reward_wrapper_metrics_reward_done
+        - obs_wrapper_policy_obs
+
+  logging_wrapper_output:
+    leaves:
+      plus:
+        - obs_raw_episode_step_and_orbit_episode_done
+        - reward_wrapper_metrics_reward_done
+        - obs_wrapper_policy_obs
+        - logging_wrapper_info_cumsums
+
+  remap_and_filter_wrapper_output:
+    leaves:
+      plus:
+        - remap_wrapper_metrics_reward_done
+        - remap_wrapper_original_player_mask_stat
+        - remap_wrapper_obs_policy
+        - remap_wrapper_obs_masks_stat
+        - remap_wrapper_info_cumsums
+
+  env_batch_wrapper_output:
+    leaves:
+      plus:
+        - env_batch_remap_wrapper_metrics_reward_done
+        - env_batch_original_player_mask_stat
+        - env_batch_remap_wrapper_obs_policy
+        - env_batch_remap_wrapper_obs_masks_stat
+        - env_batch_remap_wrapper_info_cumsums
+
+  infer_request_buffer_template:
+    leaves:
+      plus:
+        - env_batch_remap_wrapper_obs_policy
+        - benchmark_infer_request_seat_mapping
+
+  infer_result_buffer_template:
+    leaves:
+      plus:
+        - infer_result_policy_slots
+
+  actor_learn_buffer_template:
+    leaves:
+      plus:
+        - actor_learn_reward_done
+        - actor_learn_policy_heads
+        - actor_learn_obs_policy
+        - actor_learn_policy_masks
+
+  learner_gpu_buffer_template:
+    leaves:
+      plus:
+        - learner_gpu_reward_done
+        - learner_gpu_policy_heads
+        - learner_gpu_obs_policy
+        - learner_gpu_policy_masks
+
+# ``env.step(actions)`` for inner Orbit stack: required list of per-seat CPU tensors; optional tape extras.
+contracts_step_inputs:
+  orbit_wars_env_step_actions:
+    dict_key: orbit_pairwise_classes
+    list_length_from_flags: orbit_num_agents
+    item:
+      shape: [44]
+      dtype: int64
+      cpu_only: true
+    optional_tensor_leaves:
+      tape_baseline_LEARN:
+        shape: [flags.orbit_num_agents]
+        dtype: float32
+        cpu_only: true
+    optional_any_leaves:
+      - tape_supervised_pred
+    optional_dict_tensor_leaves:
+      tape_supervised_target:
+        value:
+          shape: [flags.orbit_num_agents, 44]
+          dtype: float32
+          cpu_only: true
+      tape_supervised_valid:
+        value:
+          shape: [flags.orbit_num_agents, 44]
+          dtype: bool
+          cpu_only: true

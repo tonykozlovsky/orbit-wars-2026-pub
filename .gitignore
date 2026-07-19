@@ -1,0 +1,9 @@
+python/wandb
+.idea
+*.tar.gz
+outputs/
+datasets/
+wandb/
+versions/
+versions_competition/
+*.pt
